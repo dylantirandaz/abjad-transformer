@@ -1,0 +1,28 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D1",     # missing docstrings: names and types carry the meaning, docstrings only where they add something
+    "D203",   # conflicts with D211
+    "D213",   # conflicts with D212
+    "COM812", # conflicts with the formatter
+    "T201",   # print is how these command-line scripts report progress
+    "INP001", # flat script layout, not a package
+    "N812",   # `import torch.nn.functional as F` is the standard PyTorch idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = [
+    "S101",    # pytest relies on bare asserts
+    "PLR2004", # literal expected values are the point of a test
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["."]
