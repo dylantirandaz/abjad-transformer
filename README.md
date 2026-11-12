@@ -12,7 +12,7 @@ applies that to a character-level transformer:
 The skeleton is about 70% of the original length, so the slow one-character-at-a-time model takes about 30%
 fewer steps. The question is how much quality that costs.
 
-## Why the comparison is fair
+## Fairness
 
 Splitting text into a skeleton plus the removed vowels loses nothing, so
 
