@@ -8,4 +8,4 @@ __pycache__/
 # Run artifacts
 data/
 checkpoints/
-results.json
+results*.json

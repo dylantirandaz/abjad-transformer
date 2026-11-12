@@ -62,11 +62,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", default="data/input.txt")
     parser.add_argument("--checkpoint_dir", default="checkpoints")
+    parser.add_argument("--baseline_dir", default=None, help="load the baseline from here instead of --checkpoint_dir")
     parser.add_argument("--max_chars", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args(argv)
+
+
+def resolve_checkpoint_dir(task: str, args: argparse.Namespace) -> str:
+    """Let the baseline live in its own directory so one abjad system can be scored against several baselines."""
+    if task == "baseline" and args.baseline_dir:
+        return str(args.baseline_dir)
+    return str(args.checkpoint_dir)
 
 
 def load_model(checkpoint_dir: str, task: str, device: str) -> Transformer:
@@ -215,7 +223,7 @@ def time_generation(generate: TextGenerator, models: Models, corpus: Corpus, tem
 def evaluate(args: argparse.Namespace) -> Report:
     torch.manual_seed(args.seed)
     corpus = load_corpus(args.data, args.device, args.max_chars)
-    models = {task: load_model(args.checkpoint_dir, task, args.device) for task in TASKS}
+    models = {task: load_model(resolve_checkpoint_dir(task, args), task, args.device) for task in TASKS}
     return {
         "val_chars": corpus.val.n_chars,
         "n_vowel_run_classes": len(corpus.run_vocab),

@@ -8,7 +8,7 @@ import torch
 
 from abjad import BOS
 from data import TASKS, Corpus, load_corpus, task_streams
-from evaluate import decode_abjad, iterate_tiles, measure_word_accuracy, sum_bits
+from evaluate import decode_abjad, iterate_tiles, measure_word_accuracy, parse_args, resolve_checkpoint_dir, sum_bits
 from model import ModelConfig, Transformer
 from train import should_evaluate
 
@@ -83,6 +83,14 @@ def test_word_accuracy_stays_aligned_when_a_vowel_only_word_is_missed() -> None:
     assert measure_word_accuracy("I saw a cat", "I saw  cat") == pytest.approx(0.75)
     assert measure_word_accuracy("I saw a cat", "I saw a cat") == pytest.approx(1.0)
     assert measure_word_accuracy("the  cat", "the a cat") == pytest.approx(2 / 3)
+
+
+def test_only_the_baseline_moves_when_a_baseline_dir_is_given() -> None:
+    args = parse_args(["--checkpoint_dir", "main", "--baseline_dir", "control"])
+    assert resolve_checkpoint_dir("baseline", args) == "control"
+    assert resolve_checkpoint_dir("skeleton", args) == "main"
+    assert resolve_checkpoint_dir("vocalizer", args) == "main"
+    assert resolve_checkpoint_dir("baseline", parse_args(["--checkpoint_dir", "main"])) == "main"
 
 
 def test_final_step_is_always_evaluated() -> None:

@@ -1,8 +1,9 @@
 """Run the abjad experiment on Modal GPUs.
 
 Usage:
-modal run modal_app.py                    # full run
-modal run modal_app.py --max-steps 200    # quick end-to-end check
+modal run modal_app.py::main                    # train all three models, then evaluate
+modal run modal_app.py::main --max-steps 200    # quick end-to-end check
+modal run modal_app.py::control                 # shallow-baseline control, run after main
 """
 
 import io
@@ -27,10 +28,14 @@ BYTES_PER_MEGABYTE = 1e6
 VOLUME_PATH = "/vol"
 DATA_PATH = f"{VOLUME_PATH}/data/input.txt"
 CHECKPOINT_DIR = f"{VOLUME_PATH}/checkpoints"
+CONTROL_CHECKPOINT_DIR = f"{VOLUME_PATH}/checkpoints-control"
 DATASET_URL = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt"
 
 # The abjad system splits the baseline's depth between its two models so total size matches.
 LAYERS_PER_TASK = {"baseline": 6, "skeleton": 4, "vocalizer": 2}
+# The control baseline is as shallow as the skeleton model, to separate the effect of
+# dropping vowels from the effect of simply running a smaller model.
+CONTROL_BASELINE_LAYERS = LAYERS_PER_TASK["skeleton"]
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -57,14 +62,14 @@ def download_dataset() -> int:
 
 
 @app.function(image=image, gpu=GPU_TYPE, volumes={VOLUME_PATH: volume}, timeout=TIMEOUT_SECONDS)
-def train_task(task: str, max_steps: int) -> float:
+def train_task(task: str, n_layer: int, out_dir: str, max_steps: int) -> float:
     """Train one model and store its best checkpoint in the volume."""
     args = train.parse_args(
         [
             *("--task", task),
             *("--data", DATA_PATH),
-            *("--out_dir", CHECKPOINT_DIR),
-            *("--n_layer", str(LAYERS_PER_TASK[task])),
+            *("--out_dir", out_dir),
+            *("--n_layer", str(n_layer)),
             *("--max_steps", str(max_steps)),
         ]
     )
@@ -74,26 +79,43 @@ def train_task(task: str, max_steps: int) -> float:
 
 
 @app.function(image=image, gpu=GPU_TYPE, volumes={VOLUME_PATH: volume}, timeout=TIMEOUT_SECONDS)
-def evaluate_models() -> evaluate.Report:
-    args = evaluate.parse_args(["--data", DATA_PATH, "--checkpoint_dir", CHECKPOINT_DIR])
+def evaluate_models(baseline_dir: str = CHECKPOINT_DIR) -> evaluate.Report:
+    args = evaluate.parse_args(
+        ["--data", DATA_PATH, "--checkpoint_dir", CHECKPOINT_DIR, "--baseline_dir", baseline_dir]
+    )
     return evaluate.evaluate(args)
 
 
-@app.local_entrypoint()
-def main(max_steps: int = DEFAULT_MAX_STEPS) -> None:
+def configure_console() -> None:
     # Windows consoles default to a legacy code page that cannot print every dataset character.
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+
+def save_report(results: evaluate.Report, filename: str) -> None:
+    evaluate.print_report(results)
+    Path(filename).write_text(json.dumps(results, indent=2), encoding="utf-8")
+    print(f"\nSaved {filename}")
+
+
+@app.local_entrypoint()
+def main(max_steps: int = DEFAULT_MAX_STEPS) -> None:
+    configure_console()
     dataset_bytes = download_dataset.remote()
     print(f"Dataset ready: {dataset_bytes / BYTES_PER_MEGABYTE:.1f} MB")
 
-    tasks = list(LAYERS_PER_TASK)
-    best_losses = train_task.starmap([(task, max_steps) for task in tasks])
-    for task, best_loss in zip(tasks, best_losses, strict=True):
+    jobs = [(task, n_layer, CHECKPOINT_DIR, max_steps) for task, n_layer in LAYERS_PER_TASK.items()]
+    best_losses = train_task.starmap(jobs)
+    for task, best_loss in zip(LAYERS_PER_TASK, best_losses, strict=True):
         print(f"{task}: best validation loss {best_loss:.4f}")
 
-    results = evaluate_models.remote()
-    evaluate.print_report(results)
-    Path("results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print("\nSaved results.json")
+    save_report(evaluate_models.remote(), "results.json")
+
+
+@app.local_entrypoint()
+def control(max_steps: int = DEFAULT_MAX_STEPS) -> None:
+    """Score a baseline as shallow as the skeleton model against the already-trained abjad system."""
+    configure_console()
+    best_loss = train_task.remote("baseline", CONTROL_BASELINE_LAYERS, CONTROL_CHECKPOINT_DIR, max_steps)
+    print(f"control baseline ({CONTROL_BASELINE_LAYERS} layers): best validation loss {best_loss:.4f}")
+    save_report(evaluate_models.remote(CONTROL_CHECKPOINT_DIR), "results_control.json")
