@@ -6,9 +6,7 @@ modal run modal_app.py::main --max-steps 200    # quick end-to-end check
 modal run modal_app.py::control                 # shallow-baseline control, run after main
 """
 
-import io
 import json
-import sys
 import urllib.request
 from pathlib import Path
 
@@ -16,6 +14,7 @@ import modal
 
 import evaluate
 import train
+from console import configure_console
 
 APP_NAME = "abjad-transformer"
 VOLUME_NAME = "abjad-experiment"
@@ -42,7 +41,7 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(f"torch=={TORCH_VERSION}")
-    .add_local_python_source("abjad", "data", "model", "train", "evaluate")
+    .add_local_python_source("abjad", "console", "data", "model", "train", "evaluate")
 )
 
 
@@ -84,12 +83,6 @@ def evaluate_models(baseline_dir: str = CHECKPOINT_DIR) -> evaluate.Report:
         ["--data", DATA_PATH, "--checkpoint_dir", CHECKPOINT_DIR, "--baseline_dir", baseline_dir]
     )
     return evaluate.evaluate(args)
-
-
-def configure_console() -> None:
-    # Windows consoles default to a legacy code page that cannot print every dataset character.
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def save_report(results: evaluate.Report, filename: str) -> None:

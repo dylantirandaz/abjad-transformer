@@ -8,4 +8,7 @@ __pycache__/
 # Run artifacts
 data/
 checkpoints/
+prepared/
+chord_checkpoints/
 results*.json
+count.json

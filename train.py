@@ -7,13 +7,16 @@ python train.py --task vocalizer  # fills vowels back into a skeleton in one pas
 """
 
 import argparse
+import functools
 import math
 import time
-from dataclasses import asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from data import TASKS, Corpus, load_corpus, sample_windows, task_streams, task_vocab_sizes
 from model import ModelConfig, Transformer
@@ -25,6 +28,19 @@ GRAD_CLIP_NORM = 1.0
 EVAL_BATCHES = 50
 
 Streams = tuple[torch.Tensor, torch.Tensor]
+type LossFunction[ModelT: nn.Module] = Callable[[ModelT, torch.Tensor, torch.Tensor, str], torch.Tensor]
+
+
+@dataclass(frozen=True)
+class TrainingRun[ModelT: nn.Module]:
+    """Everything the training loop needs that differs between experiments."""
+
+    label: str
+    model: ModelT
+    compute_loss: LossFunction[ModelT]
+    train_streams: Streams
+    val_streams: Streams
+    save: Callable[[int, float], None]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -33,6 +49,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data", default="data/input.txt")
     parser.add_argument("--out_dir", default="checkpoints")
     parser.add_argument("--max_chars", type=int, default=None)
+    add_training_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def add_training_arguments(parser: argparse.ArgumentParser) -> None:
+    """Model size and optimisation settings shared by every experiment."""
     parser.add_argument("--n_layer", type=int, default=6)
     parser.add_argument("--n_head", type=int, default=6)
     parser.add_argument("--n_embd", type=int, default=384)
@@ -44,7 +66,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    return parser.parse_args(argv)
 
 
 def build_model_config(args: argparse.Namespace, corpus: Corpus) -> ModelConfig:
@@ -81,13 +102,11 @@ def compute_loss(model: Transformer, inputs: torch.Tensor, targets: torch.Tensor
 
 
 @torch.no_grad()
-def estimate_val_loss(model: Transformer, streams: Streams, args: argparse.Namespace) -> float:
-    model.eval()
-    losses = [
-        float(compute_loss(model, *sample_windows(*streams, args.block_size, args.batch_size), args.device).item())
-        for _ in range(EVAL_BATCHES)
-    ]
-    model.train()
+def estimate_val_loss[ModelT: nn.Module](run: TrainingRun[ModelT], args: argparse.Namespace) -> float:
+    run.model.eval()
+    batches = [sample_windows(*run.val_streams, args.block_size, args.batch_size) for _ in range(EVAL_BATCHES)]
+    losses = [float(run.compute_loss(run.model, inputs, targets, args.device).item()) for inputs, targets in batches]
+    run.model.train()
     return sum(losses) / len(losses)
 
 
@@ -104,42 +123,51 @@ def save_checkpoint(model: Transformer, args: argparse.Namespace, step: int, val
     torch.save(checkpoint, out_dir / f"{args.task}.pt")
 
 
-def run_training_step(
-    model: Transformer, optimizer: torch.optim.Optimizer, streams: Streams, step: int, args: argparse.Namespace
+def run_training_step[ModelT: nn.Module](
+    run: TrainingRun[ModelT], optimizer: torch.optim.Optimizer, step: int, args: argparse.Namespace
 ) -> None:
     for group in optimizer.param_groups:
         group["lr"] = learning_rate_at(step, args.lr, args.max_steps)
-    inputs, targets = sample_windows(*streams, args.block_size, args.batch_size)
-    loss = compute_loss(model, inputs, targets, args.device)
+    inputs, targets = sample_windows(*run.train_streams, args.block_size, args.batch_size)
+    loss = run.compute_loss(run.model, inputs, targets, args.device)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()  # type: ignore[no-untyped-call]
-    torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+    torch.nn.utils.clip_grad_norm_(run.model.parameters(), GRAD_CLIP_NORM)
     optimizer.step()
+
+
+def fit[ModelT: nn.Module](run: TrainingRun[ModelT], args: argparse.Namespace) -> float:
+    """Train, validating on a schedule and saving whenever validation improves. Returns the best loss."""
+    optimizer = torch.optim.AdamW(run.model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY)
+    best_val_loss = float("inf")
+    started = time.time()
+    for step in range(args.max_steps + 1):
+        if should_evaluate(step, args.eval_interval, args.max_steps):
+            val_loss = estimate_val_loss(run, args)
+            print(f"[{run.label}] step {step:5d}  val loss {val_loss:.4f}  ({time.time() - started:.0f}s)")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                run.save(step, val_loss)
+        run_training_step(run, optimizer, step, args)
+
+    print(f"[{run.label}] done, best val loss {best_val_loss:.4f}")
+    return best_val_loss
 
 
 def train(args: argparse.Namespace) -> float:
     torch.manual_seed(args.seed)
     corpus = load_corpus(args.data, args.device, args.max_chars)
-    train_streams = task_streams(args.task, corpus.train)
-    val_streams = task_streams(args.task, corpus.val)
-
     model = Transformer(build_model_config(args, corpus)).to(args.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=WEIGHT_DECAY)
-    print(f"[{args.task}] {model.count_parameters():,} parameters, {len(train_streams[0]):,} training tokens")
-
-    best_val_loss = float("inf")
-    started = time.time()
-    for step in range(args.max_steps + 1):
-        if should_evaluate(step, args.eval_interval, args.max_steps):
-            val_loss = estimate_val_loss(model, val_streams, args)
-            print(f"[{args.task}] step {step:5d}  val loss {val_loss:.4f}  ({time.time() - started:.0f}s)")
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_checkpoint(model, args, step, val_loss)
-        run_training_step(model, optimizer, train_streams, step, args)
-
-    print(f"[{args.task}] done, best val loss {best_val_loss:.4f}")
-    return best_val_loss
+    run = TrainingRun(
+        label=args.task,
+        model=model,
+        compute_loss=compute_loss,
+        train_streams=task_streams(args.task, corpus.train),
+        val_streams=task_streams(args.task, corpus.val),
+        save=functools.partial(save_checkpoint, model, args),
+    )
+    print(f"[{args.task}] {model.count_parameters():,} parameters, {len(run.train_streams[0]):,} training tokens")
+    return fit(run, args)
 
 
 if __name__ == "__main__":

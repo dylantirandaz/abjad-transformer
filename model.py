@@ -1,6 +1,7 @@
 """A small transformer usable as a causal language model or a bidirectional tagger."""
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 import torch.nn.functional as F
@@ -24,8 +25,31 @@ class ModelConfig:
     causal: bool
 
 
+class BlockConfig(Protocol):
+    """The settings a transformer block needs, whatever model it sits in."""
+
+    @property
+    def n_head(self) -> int: ...
+
+    @property
+    def n_embd(self) -> int: ...
+
+    @property
+    def dropout(self) -> float: ...
+
+    @property
+    def causal(self) -> bool: ...
+
+
+def init_weights(module: nn.Module) -> None:
+    if isinstance(module, (nn.Linear, nn.Embedding)):
+        nn.init.normal_(module.weight, mean=0.0, std=INIT_STD)
+    if isinstance(module, nn.Linear) and module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
 class SelfAttention(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: BlockConfig) -> None:
         super().__init__()
         self.n_head = config.n_head
         self.causal = config.causal
@@ -48,7 +72,7 @@ class SelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: BlockConfig) -> None:
         super().__init__()
         self.norm_attn = nn.LayerNorm(config.n_embd)
         self.attn = SelfAttention(config)
@@ -76,14 +100,7 @@ class Transformer(nn.Module):
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.n_layer))
         self.norm_out = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, config.n_out, bias=False)
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(module: nn.Module) -> None:
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(module.weight, mean=0.0, std=INIT_STD)
-        if isinstance(module, nn.Linear) and module.bias is not None:
-            nn.init.zeros_(module.bias)
+        self.apply(init_weights)
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         length = ids.shape[1]

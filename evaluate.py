@@ -92,11 +92,14 @@ def load_model(checkpoint_dir: str, task: str, device: str) -> Transformer:
 def iterate_tiles(
     inputs: torch.Tensor, targets: torch.Tensor, block_size: int
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-    """Yield (inputs, targets) batches of windows that cover both streams exactly once."""
+    """Yield (inputs, targets) batches of windows that cover both streams exactly once.
+
+    Streams may carry extra trailing dimensions, such as the two columns of a chord stream.
+    """
     n_full = len(inputs) // block_size
     cut = n_full * block_size
-    full_inputs = inputs[:cut].view(n_full, block_size)
-    full_targets = targets[:cut].view(n_full, block_size)
+    full_inputs = inputs[:cut].reshape(n_full, block_size, *inputs.shape[1:])
+    full_targets = targets[:cut].reshape(n_full, block_size, *targets.shape[1:])
     for start in range(0, n_full, EVAL_BATCH_WINDOWS):
         yield full_inputs[start : start + EVAL_BATCH_WINDOWS], full_targets[start : start + EVAL_BATCH_WINDOWS]
     if cut < len(inputs):
